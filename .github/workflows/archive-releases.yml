@@ -14,12 +14,67 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # Checkout destination repository
       - name: Checkout archive repository
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.ARCHIVE_TOKEN }}
 
+      # Check upstream repository availability
+      - name: Check upstream repository status
+        id: upstream
+        env:
+          GH_TOKEN: ${{ secrets.ARCHIVE_TOKEN }}
+        run: |
+          if gh api repos/itsPLK/fastcars-recomp-nx2 >/dev/null 2>&1; then
+            STATUS="🟢 Online"
+            UP=true
+          else
+            STATUS="🔴 Offline"
+            UP=false
+          fi
+
+          echo "up=$UP" >> "$GITHUB_OUTPUT"
+          export STATUS
+
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          path = Path("README.md")
+          content = path.read_text() if path.exists() else ""
+
+          start = "<!-- UPSTREAM-STATUS:START -->"
+          end = "<!-- UPSTREAM-STATUS:END -->"
+
+          section = (
+              f"{start}\n"
+              f"**Status:** {os.environ['STATUS']}\n"
+              f"{end}"
+          )
+
+          if start in content and end in content:
+              before, remainder = content.split(start, 1)
+              _, after = remainder.split(end, 1)
+              content = before + section + after
+          else:
+              content += "\n\n" + section + "\n"
+
+          path.write_text(content)
+          PY
+
+          if ! git diff --quiet -- README.md; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+            git add README.md
+            git commit -m "Update upstream repository status"
+            git push
+          fi
+
+      # Archive releases only if upstream is online
       - name: Archive new releases
+        if: steps.upstream.outputs.up == 'true'
         env:
           GH_TOKEN: ${{ secrets.ARCHIVE_TOKEN }}
         run: |
@@ -34,14 +89,22 @@ jobs:
           while IFS=$'\t' read -r title tag; do
             [ -n "$tag" ] || continue
 
-            folder="$title"
+            # Use release title, falling back to tag name
+            folder="${title:-$tag}"
 
-            if [ -d "$folder" ]; then
-              echo "Already archived: $title"
+            # Prevent unsafe folder names
+            if [[ "$folder" == *"/"* || "$folder" == *".."* ]]; then
+              echo "Skipping unsafe release title: $folder"
               continue
             fi
 
-            echo "Archiving release: $title ($tag)"
+            # Skip already archived releases
+            if [ -d "$folder" ]; then
+              echo "Already archived: $folder"
+              continue
+            fi
+
+            echo "Archiving release: $folder ($tag)"
 
             mkdir -p "$folder"
 
@@ -49,16 +112,19 @@ jobs:
               'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' \
               "$tag")
 
+            # Download ZIP archive
             curl -fL \
               "https://github.com/$REPO/archive/refs/tags/$encoded_tag.zip" \
               -o "$folder/source.zip"
 
+            # Download TAR.GZ archive
             curl -fL \
               "https://github.com/$REPO/archive/refs/tags/$encoded_tag.tar.gz" \
               -o "$folder/source.tar.gz"
 
           done <<< "$releases"
 
+          # Commit and push new archives
           if [ -n "$(git status --porcelain)" ]; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
