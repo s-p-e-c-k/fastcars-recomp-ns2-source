@@ -1,0 +1,71 @@
+
+name: Archive Upstream Releases
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout archive repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.ARCHIVE_TOKEN }}
+
+      - name: Archive new releases
+        env:
+          GH_TOKEN: ${{ secrets.ARCHIVE_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          REPO="itsPLK/fastcars-recomp-nx2"
+
+          releases=$(gh api "repos/$REPO/releases" \
+            --paginate \
+            --jq '.[] | select(.draft == false) | [.name, .tag_name] | @tsv')
+
+          while IFS=$'\t' read -r title tag; do
+            [ -n "$tag" ] || continue
+
+            folder="$title"
+
+            if [ -d "$folder" ]; then
+              echo "Already archived: $title"
+              continue
+            fi
+
+            echo "Archiving release: $title ($tag)"
+
+            mkdir -p "$folder"
+
+            encoded_tag=$(python3 -c \
+              'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' \
+              "$tag")
+
+            curl -fL \
+              "https://github.com/$REPO/archive/refs/tags/$encoded_tag.zip" \
+              -o "$folder/source.zip"
+
+            curl -fL \
+              "https://github.com/$REPO/archive/refs/tags/$encoded_tag.tar.gz" \
+              -o "$folder/source.tar.gz"
+
+          done <<< "$releases"
+
+          if [ -n "$(git status --porcelain)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+            git add .
+            git commit -m "Archive new upstream releases"
+            git push
+          else
+            echo "No new releases to archive."
+          fi
